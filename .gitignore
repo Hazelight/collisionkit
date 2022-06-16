@@ -1,0 +1,8 @@
+build/
+win64/
+
+vcpkg/
+
+*.swp
+
+*.lpk
