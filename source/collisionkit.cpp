@@ -29,6 +29,12 @@
 #include <lxu_vector.hpp>
 #include <lxu_select.hpp>
 
+#include <lx_log.hpp>
+#include <lxu_log.hpp>
+
+#include <sstream>
+#include <string>
+
 
 namespace PMP = CGAL::Polygon_mesh_processing;
 
@@ -140,12 +146,24 @@ void COptimalBoundingBox::basic_Execute(unsigned flags) {
     primary_layer.clear();
     primary_layer = NULL;
 
+    // init a log and report time elapsed after running the operation,
+    CLxUser_Log log;
+    CLxUser_LogService log_service;
+    CLxUser_LogEntry entry;
+    log_service.GetSubSystem(LXsLOG_LOGSYS, log);
+
+    CGAL::Real_timer timer;
+    timer.start();
 
     // Run the CGAL method to get the Optimal Bounding Box for all the points,
     std::array<Point, 8> optimal_bounding_box_points;  // The eight points making up the bounding box will be stored to this array,
     CGAL::oriented_bounding_box(input_points, optimal_bounding_box_points,
         CGAL::parameters::use_convex_hull(true));
 
+    std::stringstream ss;
+    ss << "Elapsed Time: " << timer.time();
+    log_service.NewEntry(LXe_INFO, ss.str().c_str(), entry);
+    log.AddEntry(entry);
 
     // Exit if scene is not valid,
     if (!scene.test())
