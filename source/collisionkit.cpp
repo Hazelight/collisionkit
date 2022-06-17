@@ -9,7 +9,7 @@
 
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Surface_mesh.h>
-
+#include <CGAL/convex_hull_3.h>
 #include <CGAL/optimal_bounding_box.h>
 #include <CGAL/Polygon_mesh_processing/triangulate_faces.h>
 #include <CGAL/Polygon_mesh_processing/measure.h>
@@ -75,8 +75,6 @@ typedef CGAL::Surface_mesh<Point>                              Surface_mesh;
 //
 //    return EXIT_SUCCESS;
 //}
-
-#define SRVNAME_COMMAND	"ubx.new"
 
 using namespace lx_err;
 
@@ -231,12 +229,142 @@ void COptimalBoundingBox::basic_Execute(unsigned flags) {
     mesh.SetMeshEdits(LXf_MESHEDIT_GEOMETRY);
 }
 
-void initialize() {
-    CLxGenericPolymorph* srv;
+class CConvexHull : public CLxBasicCommand {
+public:
+    CConvexHull();
+    int basic_CmdFlags() LXx_OVERRIDE;
+    void basic_Execute(unsigned flags);
 
-    srv = new CLxPolymorph<COptimalBoundingBox>;
-    srv->AddInterface(new CLxIfc_Command<COptimalBoundingBox>);
-    srv->AddInterface(new CLxIfc_Attributes<COptimalBoundingBox>);
-    srv->AddInterface(new CLxIfc_AttributesUI<COptimalBoundingBox>);
-    lx::AddServer(SRVNAME_COMMAND, srv);
+private:
+    CLxUser_SceneService scene_service;
+    CLxUser_LayerService layer_service;
+
+    CLxUser_Scene scene;  // will be set to the context of selected item, and used to add items to scene
+
+    LXtItemType mesh_type;  // type, so we can tell the scene to add a "mesh",
+    CLxUser_Item item;  // the item we will be creating, if all goes well
+    CLxUser_Mesh mesh;
+    CLxUser_Point point_accessor;  // Point accessor to read and write point data from mesh in Modo,
+    CLxUser_Polygon polygon_accessor; // Polygon accessor to write polygons to meshe in Modo,
+};
+
+CConvexHull::CConvexHull() {}
+
+int CConvexHull::basic_CmdFlags() {
+    return LXfCMD_MODEL | LXfCMD_UNDO;
+}
+
+void CConvexHull::basic_Execute(unsigned flags) {
+
+    // start layerscan
+    CLxUser_LayerScan primary_layer;
+    layer_service.ScanAllocate(LXf_LAYERSCAN_PRIMARY, primary_layer);
+
+    // exit early if no primary mesh
+    unsigned int any_primary_layer;
+    primary_layer.Count(&any_primary_layer);
+    if (!any_primary_layer)
+        return;
+
+    // set item and mesh to the primary layer,
+    primary_layer.ItemByIndex(0, item);
+    primary_layer.BaseMeshByIndex(0, mesh);
+
+    // Store number of points so we can initialize a vector K::Point_3 of same size
+    unsigned int num_points;
+    mesh.PointCount(&num_points);
+    std::vector<Point> input_points(num_points);
+
+    // modo vertex position to CGAL point list for primary mesh
+    point_accessor.fromMesh(mesh);
+    LXtFVector position;
+    for (unsigned i = 0; i < num_points; i++) {
+        point_accessor.SelectByIndex(i);
+        point_accessor.Pos(position);
+        input_points[i] = Point(position[0], position[1], position[2]);
+    }
+
+    primary_layer.Apply();
+    primary_layer.clear();
+    primary_layer = NULL;
+
+    // generate the convex hull mesh,
+    Surface_mesh surface_mesh;
+    CGAL::convex_hull_3(input_points.begin(), input_points.end(), surface_mesh);
+
+    // add mesh item to scene
+    item.GetContext(scene);
+    scene_service.ItemTypeLookup(LXsTYPE_MESH, &mesh_type);
+    scene.ItemAdd(mesh_type, item);
+
+    // get channel write
+    CLxUser_ChannelWrite channel_write;
+    check(scene.Channels(LXs_ACTIONLAYER_EDIT, 0.0, channel_write));
+
+    // get mesh for our newly added item
+    unsigned channel_index;
+    check(item.ChannelLookup(LXsICHAN_MESH_MESH, &channel_index));
+    check(channel_write.ValueObj(item, channel_index, mesh));
+
+    // set accessors to the mesh
+    check(point_accessor.fromMesh(mesh));
+    check(polygon_accessor.fromMesh(mesh));
+
+    // add points from convex hull to the modo mesh
+    std::vector<LXtPointID> verts;
+    LXtPointID point_id;
+    LXtVector set_position;
+    for (Surface_mesh::Vertex_index vertex_descriptor : surface_mesh.vertices()) {
+        Point point = surface_mesh.point(vertex_descriptor);
+        
+        set_position[0] = point.x();
+        set_position[1] = point.y();
+        set_position[2] = point.z();
+
+        point_accessor.New(set_position, &point_id);
+        verts.push_back(point_id);
+    }
+
+    // create polygons from convex hull to modo mesh,
+    std::vector<LXtPointID> face_verts;
+    LXtPolygonID polygon_id;
+    for (Surface_mesh::Face_index face_descriptor : surface_mesh.faces()) {
+        // get point ids for face vertices
+        for (Surface_mesh::Vertex_index vertex_descriptor : CGAL::vertices_around_face(surface_mesh.halfedge(face_descriptor), surface_mesh)) {
+            face_verts.push_back(verts[vertex_descriptor]);
+        }
+
+        // create a point id array which polygon.new requires
+        int size = static_cast<int>(face_verts.size());
+        LXtPointID* varr;
+        varr = new LXtPointID[size];
+        for (int i = 0; i < size; i++)
+            varr[i] = face_verts[i];
+
+        // Create the Modo polygon face for the mesh,
+        check(polygon_accessor.New(LXiPTYP_FACE, varr, size, false, &polygon_id));
+
+        face_verts.clear(); // clear vector with face verts
+        delete[] varr; // delete the array
+    }
+
+    mesh.SetMeshEdits(LXf_MESHEDIT_GEOMETRY);
+}
+
+void initialize() {
+    CLxGenericPolymorph* ubx;
+    CLxGenericPolymorph* ucx;
+
+    ubx = new CLxPolymorph<COptimalBoundingBox>;
+    ubx->AddInterface(new CLxIfc_Command<COptimalBoundingBox>);
+    ubx->AddInterface(new CLxIfc_Attributes<COptimalBoundingBox>);
+    ubx->AddInterface(new CLxIfc_AttributesUI<COptimalBoundingBox>);
+    lx::AddServer("ubx.new", ubx);
+
+    ucx = new CLxPolymorph<CConvexHull>;
+    ucx->AddInterface(new CLxIfc_Command<CConvexHull>);
+    ucx->AddInterface(new CLxIfc_Attributes<CConvexHull>);
+    ucx->AddInterface(new CLxIfc_AttributesUI<CConvexHull>);
+    lx::AddServer("ucx.new", ucx);
+
 }
