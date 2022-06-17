@@ -40,43 +40,76 @@ namespace PMP = CGAL::Polygon_mesh_processing;
 
 typedef CGAL::Exact_predicates_inexact_constructions_kernel    K;
 typedef K::Point_3                                             Point;
-
 typedef CGAL::Surface_mesh<Point>                              Surface_mesh;
 
-//int main(int argc, char** argv)
-//{
-//    const std::string filename = (argc > 1) ? argv[1] : CGAL::data_file_path("meshes/pig.off");
-//
-//    Surface_mesh sm;
-//    if (!PMP::IO::read_polygon_mesh(filename, sm) || sm.is_empty())
-//    {
-//        std::cerr << "Invalid input file." << std::endl;
-//        return EXIT_FAILURE;
-//    }
-//
-//    CGAL::Real_timer timer;
-//    timer.start();
-//
-//    // Compute the extreme points of the mesh, and then a tightly fitted oriented bounding box
-//    std::array<Point, 8> obb_points;
-//    CGAL::oriented_bounding_box(sm, obb_points,
-//        CGAL::parameters::use_convex_hull(true));
-//
-//    std::cout << "Elapsed time: " << timer.time() << std::endl;
-//
-//    // Make a mesh out of the oriented bounding box
-//    Surface_mesh obb_sm;
-//    CGAL::make_hexahedron(obb_points[0], obb_points[1], obb_points[2], obb_points[3],
-//        obb_points[4], obb_points[5], obb_points[6], obb_points[7], obb_sm);
-//    std::ofstream("obb.off") << obb_sm;
-//
-//    PMP::triangulate_faces(obb_sm);
-//    std::cout << "Volume: " << PMP::volume(obb_sm) << std::endl;
-//
-//    return EXIT_SUCCESS;
-//}
-
 using namespace lx_err;
+
+/*
+* Reads a CGAL surface mesh and creates a mesh item in the current Modo scene
+* 
+* Wrote this helper function to not have to repeat mostly same code in all commands.
+*/
+void create_mesh(const Surface_mesh& input) {
+    CLxUser_SceneService scene_service;
+    CLxSceneSelection scene_selection;
+    CLxUser_Scene scene;
+    LXtItemType item_type;
+    CLxUser_Item item;
+    CLxUser_Mesh mesh;
+    CLxUser_Point point_accessor;
+    CLxUser_Polygon polygon_accessor;
+    CLxUser_ChannelWrite channel_write;
+    unsigned channel_index;
+    std::vector<LXtPointID> point_ids;
+    std::vector<LXtPointID> face_verts;
+    LXtVector position;
+    LXtPolygonID polygon_id;
+    
+    scene_service.ItemTypeLookup(LXsTYPE_MESH, &item_type); // Set the item type to mesh 
+    scene_selection.Get(scene); // Get the first selected active scene
+    scene.ItemAdd(item_type, item); // Add the mesh item to scene
+    scene.Channels(LXs_ACTIONLAYER_EDIT, 0.0, channel_write); // Set the channel write object
+    item.ChannelLookup(LXsICHAN_MESH_MESH, &channel_index); // Get the channel index for the mesh
+    channel_write.ValueObj(item, channel_index, mesh); // Get the mesh object
+    point_accessor.fromMesh(mesh); // Get the point accessor
+    polygon_accessor.fromMesh(mesh); // Get the polygon accessor
+    
+    // Iterate over all input vertices and create a new point for the Modo mesh object
+    for (Surface_mesh::Vertex_index vertex_index : input.vertices()) {
+        Point point = input.point(vertex_index);  // Get the point
+
+        // Set position.xyz from point position
+        position[0] = point.x();
+        position[1] = point.y();
+        position[2] = point.z();
+
+        LXtPointID point_id;
+        point_accessor.New(position, &point_id);
+        point_ids.push_back(point_id);
+    }
+
+    // Iterate over all faces in input mesh,
+    for (Surface_mesh::Face_index face_index : input.faces()) {
+        // get point ids for face vertices
+        for (Surface_mesh::Vertex_index vertex_index : CGAL::vertices_around_face(input.halfedge(face_index), input)) {
+            face_verts.push_back(point_ids[vertex_index]);
+        }
+
+        // create a point id array which polygon.new requires
+        int size = static_cast<int>(face_verts.size()); // Get number of vertices for this face,
+        LXtPointID* varr; // Create a pointer to LX Point ID
+        varr = new LXtPointID[size]; // Create an array, of same size as number of vertices in face,
+        for (int i = 0; i < size; i++)
+            varr[i] = face_verts[i];  // Populate the array with Point IDs
+
+        polygon_accessor.New(LXiPTYP_FACE, varr, size, false, &polygon_id); // add a new polygon for the modo mesh item
+
+        face_verts.clear(); // clear vector with face verts
+        delete[] varr; // delete the array holding point ids for the face
+    }
+
+    mesh.SetMeshEdits(LXf_MESHEDIT_GEOMETRY); // Tell Modo we're finished making edits and to have them applied
+}
 
 class COptimalBoundingBox : public CLxBasicCommand {
 public:
@@ -85,17 +118,11 @@ public:
     void basic_Execute(unsigned flags);
 
 private:
-    // Services we will be using,
-    CLxUser_SceneService scene_service;
     CLxUser_LayerService layer_service;
 
-    CLxUser_Scene scene;  // will be set to the context of selected item, and used to add items to scene
-
-    LXtItemType mesh_type;  // type, so we can tell the scene to add a "mesh",
-    CLxUser_Item item;  // the item we will be creating, if all goes well
+    CLxUser_Item item;
     CLxUser_Mesh mesh;
-    CLxUser_Point point_accessor;  // Point accessor to read and write point data from mesh in Modo,
-    CLxUser_Polygon polygon_accessor; // Polygon accessor to write polygons to meshe in Modo,
+    CLxUser_Point point_accessor;
 };
 
 // We don't currently need to initialize any inputs so constructor is empty,
@@ -107,10 +134,6 @@ int COptimalBoundingBox::basic_CmdFlags() {
 }
 
 void COptimalBoundingBox::basic_Execute(unsigned flags) {
-    // Get the LXtItemType for Mesh items,
-    scene_service.ItemTypeLookup(LXsITYPE_MESH, &mesh_type);
-
-    // Get the primary selected mesh
     CLxUser_LayerScan primary_layer;
     check(layer_service.ScanAllocate(LXf_LAYERSCAN_PRIMARY, primary_layer));
 
@@ -120,10 +143,9 @@ void COptimalBoundingBox::basic_Execute(unsigned flags) {
     if (!any_primary_layer)
         return;
 
-    // Get the first available mesh in layer scan,
+    // get mesh and item from layer
     check(primary_layer.BaseMeshByIndex(0, mesh));
     check(primary_layer.ItemByIndex(0, item));
-    item.GetContext(scene);  // Get the scene the item is in.
 
     // Store number of points so we can initialize a vector K::Point_3 of same size
     unsigned int num_points;
@@ -144,89 +166,28 @@ void COptimalBoundingBox::basic_Execute(unsigned flags) {
     primary_layer.clear();
     primary_layer = NULL;
 
-    // init a log and report time elapsed after running the operation,
-    CLxUser_Log log;
-    CLxUser_LogService log_service;
-    CLxUser_LogEntry entry;
-    log_service.GetSubSystem(LXsLOG_LOGSYS, log);
+    CLxUser_Log log; // Create a log object,
+    CLxUser_LogService log_service; // Access the log service,
+    CLxUser_LogEntry entry; // Create a log entry,
+    log_service.GetSubSystem(LXsLOG_LOGSYS, log); // Get the master log system,
 
-    CGAL::Real_timer timer;
+    CGAL::Real_timer timer; // Create a timer, and start it to check how long it took to find optimal bounding box
     timer.start();
 
-    // Run the CGAL method to get the Optimal Bounding Box for all the points,
     std::array<Point, 8> optimal_bounding_box_points;  // The eight points making up the bounding box will be stored to this array,
     CGAL::oriented_bounding_box(input_points, optimal_bounding_box_points,
-        CGAL::parameters::use_convex_hull(true));
+        CGAL::parameters::use_convex_hull(true)); // Run the CGAL method to get the Optimal Bounding Box for all the points,
 
-    std::stringstream ss;
+    std::stringstream ss; // Create a string stream and push message to log entry
     ss << "Elapsed Time: " << timer.time();
     log_service.NewEntry(LXe_INFO, ss.str().c_str(), entry);
     log.AddEntry(entry);
 
-    // create a cgal surface mesh,
-    Surface_mesh surface_mesh;
+    Surface_mesh surface_mesh; // Create a cgal mesh from the optimal bound points,
     CGAL::make_hexahedron(optimal_bounding_box_points[0], optimal_bounding_box_points[1], optimal_bounding_box_points[2], optimal_bounding_box_points[3], 
         optimal_bounding_box_points[4], optimal_bounding_box_points[5], optimal_bounding_box_points[6], optimal_bounding_box_points[7], surface_mesh);
 
-    // Exit if scene is not valid,
-    if (!scene.test())
-        return;
-
-    scene.ItemAdd(mesh_type, item);
-
-    LXtObjectID obj;
-    // Now to create the new mesh data, we need a channel write object
-    CLxUser_ChannelWrite channel_write;
-    check(scene.Channels(LXs_ACTIONLAYER_EDIT, 0.0, (void**)&obj));
-    check(channel_write.take(obj));
-    unsigned channel_index;
-    check(item.ChannelLookup(LXsICHAN_MESH_MESH, &channel_index));  // first getting the channel index for the mesh data,
-    
-    check(channel_write.ValueObj(item, channel_index, (void **) &obj));
-    check(mesh.take(obj));
-
-    point_accessor.fromMesh(mesh);  // set the point accessor to the new mesh
-
-    LXtVector set_position;  // reading is done in floats while writing position is done using doubles for some reason.
-    LXtPointID point_id;
-    std::array<LXtPointID, 8> point_ids;
-    for (unsigned index = 0; index < 8; index++) {
-
-        set_position[0] = optimal_bounding_box_points[index].x();
-        set_position[1] = optimal_bounding_box_points[index].y();
-        set_position[2] = optimal_bounding_box_points[index].z();
-
-        point_accessor.New(set_position, &point_id);
-        point_ids[index] = point_id;
-    }
-
-    LXtPolygonID polygon_id;
-    check(polygon_accessor.fromMesh(mesh));
-
-    std::vector<LXtPointID> verts;
-
-    // Iterate over all faces,
-    for (Surface_mesh::Face_index face_descriptor : surface_mesh.faces()) {
-        // And get the vertex index,
-        for (Surface_mesh::Vertex_index vertex_descriptor : CGAL::vertices_around_face(surface_mesh.halfedge(face_descriptor), surface_mesh)) {
-            verts.push_back(point_ids[vertex_descriptor]);
-        }
-
-        // TODO: I don't like this, at all but looking at modo samples lxu_scene.cpp
-        // hawkeye search for "n = static_cast<int>(pv->pverts.size ());"
-        int size = static_cast<int>(verts.size());
-        LXtPointID* varr;
-        varr = new LXtPointID[size];
-        for (int i = 0; i < size; i++)
-            varr[i] = verts[i];
-
-        // Create the Modo polygon face for the mesh,
-        check(polygon_accessor.New(LXiPTYP_FACE, varr, size, false, &polygon_id));
-        verts.clear();
-        delete[] varr;
-    }
-
-    mesh.SetMeshEdits(LXf_MESHEDIT_GEOMETRY);
+    create_mesh(surface_mesh); // Run our helperer function to create a Modo mesh from the CGAL mesh,
 }
 
 class CConvexHull : public CLxBasicCommand {
@@ -236,16 +197,11 @@ public:
     void basic_Execute(unsigned flags);
 
 private:
-    CLxUser_SceneService scene_service;
     CLxUser_LayerService layer_service;
 
-    CLxUser_Scene scene;  // will be set to the context of selected item, and used to add items to scene
-
-    LXtItemType mesh_type;  // type, so we can tell the scene to add a "mesh",
-    CLxUser_Item item;  // the item we will be creating, if all goes well
+    CLxUser_Item item;
     CLxUser_Mesh mesh;
-    CLxUser_Point point_accessor;  // Point accessor to read and write point data from mesh in Modo,
-    CLxUser_Polygon polygon_accessor; // Polygon accessor to write polygons to meshe in Modo,
+    CLxUser_Point point_accessor;
 };
 
 CConvexHull::CConvexHull() {}
@@ -255,12 +211,9 @@ int CConvexHull::basic_CmdFlags() {
 }
 
 void CConvexHull::basic_Execute(unsigned flags) {
-
-    // start layerscan
     CLxUser_LayerScan primary_layer;
     layer_service.ScanAllocate(LXf_LAYERSCAN_PRIMARY, primary_layer);
 
-    // exit early if no primary mesh
     unsigned int any_primary_layer;
     primary_layer.Count(&any_primary_layer);
     if (!any_primary_layer)
@@ -275,7 +228,6 @@ void CConvexHull::basic_Execute(unsigned flags) {
     mesh.PointCount(&num_points);
     std::vector<Point> input_points(num_points);
 
-    // modo vertex position to CGAL point list for primary mesh
     point_accessor.fromMesh(mesh);
     LXtFVector position;
     for (unsigned i = 0; i < num_points; i++) {
@@ -292,63 +244,7 @@ void CConvexHull::basic_Execute(unsigned flags) {
     Surface_mesh surface_mesh;
     CGAL::convex_hull_3(input_points.begin(), input_points.end(), surface_mesh);
 
-    // add mesh item to scene
-    item.GetContext(scene);
-    scene_service.ItemTypeLookup(LXsTYPE_MESH, &mesh_type);
-    scene.ItemAdd(mesh_type, item);
-
-    // get channel write
-    CLxUser_ChannelWrite channel_write;
-    check(scene.Channels(LXs_ACTIONLAYER_EDIT, 0.0, channel_write));
-
-    // get mesh for our newly added item
-    unsigned channel_index;
-    check(item.ChannelLookup(LXsICHAN_MESH_MESH, &channel_index));
-    check(channel_write.ValueObj(item, channel_index, mesh));
-
-    // set accessors to the mesh
-    check(point_accessor.fromMesh(mesh));
-    check(polygon_accessor.fromMesh(mesh));
-
-    // add points from convex hull to the modo mesh
-    std::vector<LXtPointID> verts;
-    LXtPointID point_id;
-    LXtVector set_position;
-    for (Surface_mesh::Vertex_index vertex_descriptor : surface_mesh.vertices()) {
-        Point point = surface_mesh.point(vertex_descriptor);
-        
-        set_position[0] = point.x();
-        set_position[1] = point.y();
-        set_position[2] = point.z();
-
-        point_accessor.New(set_position, &point_id);
-        verts.push_back(point_id);
-    }
-
-    // create polygons from convex hull to modo mesh,
-    std::vector<LXtPointID> face_verts;
-    LXtPolygonID polygon_id;
-    for (Surface_mesh::Face_index face_descriptor : surface_mesh.faces()) {
-        // get point ids for face vertices
-        for (Surface_mesh::Vertex_index vertex_descriptor : CGAL::vertices_around_face(surface_mesh.halfedge(face_descriptor), surface_mesh)) {
-            face_verts.push_back(verts[vertex_descriptor]);
-        }
-
-        // create a point id array which polygon.new requires
-        int size = static_cast<int>(face_verts.size());
-        LXtPointID* varr;
-        varr = new LXtPointID[size];
-        for (int i = 0; i < size; i++)
-            varr[i] = face_verts[i];
-
-        // Create the Modo polygon face for the mesh,
-        check(polygon_accessor.New(LXiPTYP_FACE, varr, size, false, &polygon_id));
-
-        face_verts.clear(); // clear vector with face verts
-        delete[] varr; // delete the array
-    }
-
-    mesh.SetMeshEdits(LXf_MESHEDIT_GEOMETRY);
+    create_mesh(surface_mesh);
 }
 
 void initialize() {
