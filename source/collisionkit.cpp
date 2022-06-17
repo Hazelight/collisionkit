@@ -165,6 +165,11 @@ void COptimalBoundingBox::basic_Execute(unsigned flags) {
     log_service.NewEntry(LXe_INFO, ss.str().c_str(), entry);
     log.AddEntry(entry);
 
+    // create a cgal surface mesh,
+    Surface_mesh surface_mesh;
+    CGAL::make_hexahedron(optimal_bounding_box_points[0], optimal_bounding_box_points[1], optimal_bounding_box_points[2], optimal_bounding_box_points[3], 
+        optimal_bounding_box_points[4], optimal_bounding_box_points[5], optimal_bounding_box_points[6], optimal_bounding_box_points[7], surface_mesh);
+
     // Exit if scene is not valid,
     if (!scene.test())
         return;
@@ -195,6 +200,32 @@ void COptimalBoundingBox::basic_Execute(unsigned flags) {
 
         point_accessor.New(set_position, &point_id);
         point_ids[index] = point_id;
+    }
+
+    LXtPolygonID polygon_id;
+    check(polygon_accessor.fromMesh(mesh));
+
+    std::vector<LXtPointID> verts;
+
+    // Iterate over all faces,
+    for (Surface_mesh::Face_index face_descriptor : surface_mesh.faces()) {
+        // And get the vertex index,
+        for (Surface_mesh::Vertex_index vertex_descriptor : CGAL::vertices_around_face(surface_mesh.halfedge(face_descriptor), surface_mesh)) {
+            verts.push_back(point_ids[vertex_descriptor]);
+        }
+
+        // TODO: I don't like this, at all but looking at modo samples lxu_scene.cpp
+        // hawkeye search for "n = static_cast<int>(pv->pverts.size ());"
+        int size = static_cast<int>(verts.size());
+        LXtPointID* varr;
+        varr = new LXtPointID[size];
+        for (int i = 0; i < size; i++)
+            varr[i] = verts[i];
+
+        // Create the Modo polygon face for the mesh,
+        check(polygon_accessor.New(LXiPTYP_FACE, varr, size, false, &polygon_id));
+        verts.clear();
+        delete[] varr;
     }
 
     mesh.SetMeshEdits(LXf_MESHEDIT_GEOMETRY);
