@@ -11,38 +11,51 @@
 #include <CGAL/Surface_mesh.h>
 #include <CGAL/convex_hull_3.h>
 #include <CGAL/optimal_bounding_box.h>
-#include <CGAL/Polygon_mesh_processing/triangulate_faces.h>
-#include <CGAL/Polygon_mesh_processing/measure.h>
-#include <CGAL/Polygon_mesh_processing/IO/polygon_mesh_io.h>
 
-#include <CGAL/Real_timer.h>
-
-#include <fstream>
-#include <iostream>
-
-#include <lxu_command.hpp>
-
-#include <lxidef.h>
-#include <lx_action.hpp>
-#include <lx_layer.hpp>
-#include <lx_mesh.hpp>
-#include <lxu_vector.hpp>
-#include <lxu_select.hpp>
-
-#include <lx_log.hpp>
-#include <lxu_log.hpp>
-
-#include <sstream>
-#include <string>
-
-
-namespace PMP = CGAL::Polygon_mesh_processing;
+#include <lxidef.h> // LXsICHAN_MESH_MESH, symbol used for getting mesh channel
+#include <lx_action.hpp> // Channel Write,
+#include <lx_layer.hpp> // Layer Scan & Service,
+#include <lx_mesh.hpp> // Mesh, Point & Polygon
+#include <lxu_select.hpp> // Scene Selection
+#include <lxu_command.hpp> // Command
 
 typedef CGAL::Exact_predicates_inexact_constructions_kernel    K;
 typedef K::Point_3                                             Point;
 typedef CGAL::Surface_mesh<Point>                              Surface_mesh;
 
 using namespace lx_err;
+
+/*
+* Populate the vector points with data from the first selected layer in Modo,
+*/
+void get_selected_points(std::vector<Point>* points) {
+    CLxUser_LayerService layer_service;
+    CLxUser_LayerScan layer_scan;
+    unsigned layer_count;
+    unsigned point_count;
+    CLxUser_Mesh mesh;
+    CLxUser_Point point;
+    LXtFVector position;
+    
+    layer_service.ScanAllocate(LXf_LAYERSCAN_PRIMARY, layer_scan);
+    layer_scan.Count(&layer_count);
+
+    if (!layer_count)
+        return;
+
+    layer_scan.BaseMeshByIndex(0, mesh);
+    point.fromMesh(mesh);
+    mesh.PointCount(&point_count);
+    points->clear();
+    for (unsigned index = 0; index < point_count; index++) {
+        point.SelectByIndex(index);
+        point.Pos(position);
+        points->push_back(Point(position[0], position[1], position[2]));
+    }
+
+    layer_scan.Apply();
+    layer_scan.clear();
+}
 
 /*
 * Reads a CGAL surface mesh and creates a mesh item in the current Modo scene
@@ -116,72 +129,21 @@ public:
     COptimalBoundingBox();
     int basic_CmdFlags() LXx_OVERRIDE;
     void basic_Execute(unsigned flags);
-
-private:
-    CLxUser_LayerService layer_service;
-
-    CLxUser_Item item;
-    CLxUser_Mesh mesh;
-    CLxUser_Point point_accessor;
 };
 
-// We don't currently need to initialize any inputs so constructor is empty,
 COptimalBoundingBox::COptimalBoundingBox() {}
 
-// Notify Modo this command will change scene state and that we want to be able to undo it,
 int COptimalBoundingBox::basic_CmdFlags() {
-    return LXfCMD_MODEL | LXfCMD_UNDO;
+    return LXfCMD_MODEL | LXfCMD_UNDO; // Notify Modo this command will change scene state and that we want to be able to undo it,
 }
 
 void COptimalBoundingBox::basic_Execute(unsigned flags) {
-    CLxUser_LayerScan primary_layer;
-    check(layer_service.ScanAllocate(LXf_LAYERSCAN_PRIMARY, primary_layer));
-
-    // If we had a mesh selected, keep going otherwise exit early here.
-    unsigned int any_primary_layer;
-    primary_layer.Count(&any_primary_layer);
-    if (!any_primary_layer)
-        return;
-
-    // get mesh and item from layer
-    check(primary_layer.BaseMeshByIndex(0, mesh));
-    check(primary_layer.ItemByIndex(0, item));
-
-    // Store number of points so we can initialize a vector K::Point_3 of same size
-    unsigned int num_points;
-    mesh.PointCount(&num_points);
-    std::vector<Point> input_points(num_points);
-
-    // Iterate over all points in primary selected mesh, and populate vector of points,    
-    point_accessor.fromMesh(mesh);
-    LXtFVector position;
-    for (unsigned i = 0; i < num_points; i++) {
-        point_accessor.SelectByIndex(i);
-        point_accessor.Pos(position);
-        input_points[i] = Point(position[0], position[1], position[2]);
-    }
-
-    // Apply, clear and all that jazz for the layer scan,
-    primary_layer.Apply();
-    primary_layer.clear();
-    primary_layer = NULL;
-
-    CLxUser_Log log; // Create a log object,
-    CLxUser_LogService log_service; // Access the log service,
-    CLxUser_LogEntry entry; // Create a log entry,
-    log_service.GetSubSystem(LXsLOG_LOGSYS, log); // Get the master log system,
-
-    CGAL::Real_timer timer; // Create a timer, and start it to check how long it took to find optimal bounding box
-    timer.start();
+    std::vector<Point> input_points;
+    get_selected_points(&input_points);
 
     std::array<Point, 8> optimal_bounding_box_points;  // The eight points making up the bounding box will be stored to this array,
     CGAL::oriented_bounding_box(input_points, optimal_bounding_box_points,
         CGAL::parameters::use_convex_hull(true)); // Run the CGAL method to get the Optimal Bounding Box for all the points,
-
-    std::stringstream ss; // Create a string stream and push message to log entry
-    ss << "Elapsed Time: " << timer.time();
-    log_service.NewEntry(LXe_INFO, ss.str().c_str(), entry);
-    log.AddEntry(entry);
 
     Surface_mesh surface_mesh; // Create a cgal mesh from the optimal bound points,
     CGAL::make_hexahedron(optimal_bounding_box_points[0], optimal_bounding_box_points[1], optimal_bounding_box_points[2], optimal_bounding_box_points[3], 
@@ -195,13 +157,6 @@ public:
     CConvexHull();
     int basic_CmdFlags() LXx_OVERRIDE;
     void basic_Execute(unsigned flags);
-
-private:
-    CLxUser_LayerService layer_service;
-
-    CLxUser_Item item;
-    CLxUser_Mesh mesh;
-    CLxUser_Point point_accessor;
 };
 
 CConvexHull::CConvexHull() {}
@@ -211,40 +166,13 @@ int CConvexHull::basic_CmdFlags() {
 }
 
 void CConvexHull::basic_Execute(unsigned flags) {
-    CLxUser_LayerScan primary_layer;
-    layer_service.ScanAllocate(LXf_LAYERSCAN_PRIMARY, primary_layer);
+    std::vector<Point> input_points;
+    get_selected_points(&input_points);
 
-    unsigned int any_primary_layer;
-    primary_layer.Count(&any_primary_layer);
-    if (!any_primary_layer)
-        return;
+    Surface_mesh convex_hull; // From points generate a CGAL mesh,
+    CGAL::convex_hull_3(input_points.begin(), input_points.end(), convex_hull);
 
-    // set item and mesh to the primary layer,
-    primary_layer.ItemByIndex(0, item);
-    primary_layer.BaseMeshByIndex(0, mesh);
-
-    // Store number of points so we can initialize a vector K::Point_3 of same size
-    unsigned int num_points;
-    mesh.PointCount(&num_points);
-    std::vector<Point> input_points(num_points);
-
-    point_accessor.fromMesh(mesh);
-    LXtFVector position;
-    for (unsigned i = 0; i < num_points; i++) {
-        point_accessor.SelectByIndex(i);
-        point_accessor.Pos(position);
-        input_points[i] = Point(position[0], position[1], position[2]);
-    }
-
-    primary_layer.Apply();
-    primary_layer.clear();
-    primary_layer = NULL;
-
-    // generate the convex hull mesh,
-    Surface_mesh surface_mesh;
-    CGAL::convex_hull_3(input_points.begin(), input_points.end(), surface_mesh);
-
-    create_mesh(surface_mesh);
+    create_mesh(convex_hull); // Create a Modo mesh of the Convex Hull
 }
 
 void initialize() {
@@ -262,5 +190,4 @@ void initialize() {
     ucx->AddInterface(new CLxIfc_Attributes<CConvexHull>);
     ucx->AddInterface(new CLxIfc_AttributesUI<CConvexHull>);
     lx::AddServer("ucx.new", ucx);
-
 }
