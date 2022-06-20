@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package version="1121">
+  <kit name="collisionkit" restart="YES">
+    <source target="collisionkit/index.cfg">index.cfg</source>
+    <source target="collisionkit/win64/gmp-10.dll">win64/gmp-10.dll</source>
+    <source target="collisionkit/win64/collisionkit.dll">win64/collisionkit.dll</source>
+  </kit>
+  <message button="Help">Successfully installed collisionkit.</message>
+</package>
