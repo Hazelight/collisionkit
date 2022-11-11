@@ -36,21 +36,38 @@ void get_selected_points(std::vector<Point>* points) {
     CLxUser_Mesh mesh;
     CLxUser_Point point;
     LXtFVector position;
+    CLxUser_MeshService mesh_service;
     
-    layer_service.ScanAllocate(LXf_LAYERSCAN_PRIMARY, layer_scan);
+    layer_service.ScanAllocate(LXf_LAYERSCAN_ACTIVE | LXf_LAYERSCAN_MARKVERTS, layer_scan);
     layer_scan.Count(&layer_count);
 
     if (!layer_count)
         return;
 
-    layer_scan.BaseMeshByIndex(0, mesh);
-    point.fromMesh(mesh);
-    mesh.PointCount(&point_count);
+    // compose the selection mode,
+    LXtMarkMode mode;
+    mesh_service.ModeCompose("select", 0, &mode);
+
+    // Iterate over each layer, and push selected points world space position to the result,
     points->clear();
-    for (unsigned index = 0; index < point_count; index++) {
-        point.SelectByIndex(index);
-        point.Pos(position);
-        points->push_back(Point(position[0], position[1], position[2]));
+    for (unsigned layer_index = 0; layer_index < layer_count; layer_index++) {
+        // Get the base mesh, so won't support any active deformers,
+        layer_scan.BaseMeshByIndex(layer_index, mesh);
+
+        point.fromMesh(mesh);
+        mesh.PointCount(&point_count);
+        
+        for (unsigned index = 0; index < point_count; index++) {
+            point.SelectByIndex(index);
+            // Skip un-selected points,
+            if (point.TestMarks(mode) == LXe_FALSE) {
+                continue;
+            }
+            else {
+                point.Pos(position);
+                points->push_back(Point(position[0], position[1], position[2]));
+            }
+        }
     }
 
     layer_scan.Apply();
